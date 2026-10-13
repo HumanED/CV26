@@ -1,4 +1,7 @@
 __pycache__/
+.venv/
+.venv-tests/
+.ruff_cache/
 models/
 **/*.ignore*
 *.pt
