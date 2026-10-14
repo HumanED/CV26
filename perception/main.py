@@ -110,7 +110,10 @@ def main() -> None:
     if args.sim:
         source = SimSource(args.sim, (W, H), FPS, args.sim_depth_m,
                            args.sim_depth, args.loop)
-        print(f"[sim] {args.sim} | synthetic depth, so Z and size checks are not real")
+        if args.sim_depth:
+            print(f"[sim] {args.sim} | supplied depth map; camera intrinsics are approximate")
+        else:
+            print(f"[sim] {args.sim} | synthetic depth, so Z and size checks are not real")
     else:
         source = RealSenseSource()
 
