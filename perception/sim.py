@@ -36,7 +36,7 @@ def deproject(intr, pixel, z):
 def _letterbox(img, w, h, interp=cv2.INTER_AREA):
     """Resize keeping aspect ratio and pad, so object sizes are not distorted."""
     s = min(w / img.shape[1], h / img.shape[0])
-    nw, nh = int(img.shape[1] * s), int(img.shape[0] * s)
+    nw, nh = max(1, int(img.shape[1] * s)), max(1, int(img.shape[0] * s))
     out = np.zeros((h, w) + img.shape[2:], img.dtype)
     x0, y0 = (w - nw) // 2, (h - nh) // 2
     out[y0:y0 + nh, x0:x0 + nw] = cv2.resize(img, (nw, nh), interpolation=interp)
@@ -46,8 +46,19 @@ def _letterbox(img, w, h, interp=cv2.INTER_AREA):
 class SimSource:
     def __init__(self, path, size=(640, 480), fps=30, depth_m=1.5,
                  depth_path=None, loop=False):
-        self.w, self.h = size
+        try:
+            self.w, self.h = size
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Sim size must contain positive integer width and height") from exc
+        if any(isinstance(value, (bool, np.bool_))
+               or not isinstance(value, (int, np.integer)) or value <= 0
+               for value in (self.w, self.h)):
+            raise ValueError("Sim size must contain positive integer width and height")
+        if not np.isfinite(fps) or fps <= 0:
+            raise ValueError("Sim FPS must be finite and greater than zero")
         self.period = 1.0 / fps
+        if not np.isfinite(self.period):
+            raise ValueError("Sim FPS must give a finite frame interval")
         self.depth_scale = 0.001  # depth image is in millimetres
         self.loop = loop
         self._last = 0.0
@@ -64,34 +75,45 @@ class SimSource:
         self._images = []
         self._idx = 0
         if p.is_dir():
-            self._images = sorted(f for f in p.iterdir() if f.suffix.lower() in IMG_EXT)
+            self._images = sorted(f for f in p.iterdir()
+                                  if f.is_file() and f.suffix.lower() in IMG_EXT)
             if not self._images:
                 raise ValueError(f"No images in {p}")
         elif p.suffix.lower() in IMG_EXT:
             self._images = [p]
-        elif p.suffix.lower() in VID_EXT:
-            self._cap = cv2.VideoCapture(str(p))
-            if not self._cap.isOpened():
-                raise ValueError(f"Could not open video {p}")
-        else:
+        elif p.suffix.lower() not in VID_EXT:
             raise ValueError(f"Unsupported media type: {p.suffix}")
 
         if depth_path:
+            if Path(depth_path).suffix.lower() != ".png":
+                raise ValueError("--sim-depth must be a single-channel 16-bit PNG in millimetres")
             d = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
-            if d is None or d.dtype != np.uint16:
-                raise ValueError("--sim-depth must be a 16-bit PNG in millimetres")
-            self._depth = _letterbox(d, self.w, self.h, cv2.INTER_NEAREST)
+            if d is None or d.dtype != np.uint16 or d.ndim != 2:
+                raise ValueError("--sim-depth must be a single-channel 16-bit PNG in millimetres")
+            self._depth = d
         else:
-            self._depth = np.full((self.h, self.w), int(depth_m * 1000), np.uint16)
+            if not np.isfinite(depth_m) or not (0.001 <= depth_m <= 65.535):
+                raise ValueError("--sim-depth-m must be finite and between 0.001 and 65.535 metres")
+            self._depth_mm = round(depth_m * 1000)
+            self._depth = None
 
-        self.static = self._cap is None and len(self._images) == 1
+        # Validate depth before opening a video, so constructor errors cannot
+        # leave an acquired capture behind.
+        if not self._images:
+            cap = cv2.VideoCapture(str(p))
+            if not cap.isOpened():
+                cap.release()
+                raise ValueError(f"Could not open video {p}")
+            self._cap = cap
+
+        self.static = p.is_file() and self._cap is None
 
     def read(self):
         """Returns (color_bgr, depth_u16, intrinsics) or None at end of media."""
-        wait = self.period - (time.time() - self._last)
+        wait = self.period - (time.monotonic() - self._last)
         if wait > 0:
             time.sleep(wait)
-        self._last = time.time()
+        self._last = time.monotonic()
 
         if self._cap is not None:
             ok, frame = self._cap.read()
@@ -105,13 +127,22 @@ class SimSource:
                 if not self.loop:
                     return None
                 self._idx = 0
-            frame = cv2.imread(str(self._images[self._idx]))
+            image_path = self._images[self._idx]
+            frame = cv2.imread(str(image_path))
             if not self.static:
                 self._idx += 1
             if frame is None:
-                return None
+                raise ValueError(f"Could not read sim image {image_path}")
 
-        return _letterbox(frame, self.w, self.h), self._depth.copy(), self.intr
+        if self._depth is None:
+            depth = np.full(frame.shape[:2], self._depth_mm, np.uint16)
+        else:
+            if self._depth.shape != frame.shape[:2]:
+                raise ValueError("--sim-depth dimensions must match each colour frame before resizing")
+            depth = self._depth
+
+        return (_letterbox(frame, self.w, self.h),
+                _letterbox(depth, self.w, self.h, cv2.INTER_NEAREST), self.intr)
 
     def stop(self):
         if self._cap is not None:
