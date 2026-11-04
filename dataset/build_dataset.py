@@ -155,7 +155,7 @@ def split_samples(samples: Sequence[Sample], ratios: Sequence[float] = RATIOS,
 
 def write_data_yaml(path: Path, root: Path, names: Sequence[str]) -> None:
     """Write the Ultralytics dataset file. Names are JSON-quoted, which is valid YAML."""
-    lines = [f"path: {json.dumps(str(root))}"]
+    lines = [f"path: {json.dumps(root.as_posix())}"]  # forward slashes on every OS
     lines += [f"{split}: {split}/images" for split in SPLITS]
     lines.append("names:")
     lines += [f"  {i}: {json.dumps(name)}" for i, name in enumerate(names)]

@@ -13,6 +13,7 @@ Run from the repository root:
     python -m unittest discover -s tests -v
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -202,7 +203,9 @@ class OutputTests(TempDirTest):
         path = self.root / "data.yaml"
         build_dataset.write_data_yaml(path, self.root, ["bottle", "can"])
         text = path.read_text()
-        self.assertIn(f'path: "{self.root}"', text)
+        first = text.splitlines()[0]
+        self.assertTrue(first.startswith("path: "))
+        self.assertEqual(json.loads(first[len("path: "):]), self.root.as_posix())
         for line in ("train: train/images", "val: val/images", "test: test/images",
                      '  0: "bottle"', '  1: "can"'):
             self.assertIn(line + "\n", text)
