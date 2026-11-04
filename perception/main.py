@@ -77,7 +77,7 @@ def mask_depth_m(depth_img: np.ndarray, poly: np.ndarray,
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line options for sim mode."""
+    """Parse command-line options for sim mode and the YOLO weights."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--sim", metavar="PATH",
                     help="image, folder of images or video to use instead of the D435")
@@ -86,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--sim-depth-m", type=float, default=1.5,
                     help="constant synthetic depth in metres (default 1.5)")
     ap.add_argument("--loop", action="store_true", help="loop the sim media")
+    ap.add_argument("--model", default=MODEL_PATH,
+                    help=f"YOLO weights, e.g. models/yolo11s-seg-custom.pt (default {MODEL_PATH})")
     return ap.parse_args()
 
 
@@ -104,7 +106,7 @@ def catogorize(name: str, x: float, y: float, z: float) -> None:
 def main() -> None:
     """Run detection, tracking and 3D localisation on each frame until quit or end of media."""
     args: argparse.Namespace = parse_args()
-    model: YOLO = YOLO(MODEL_PATH)
+    model: YOLO = YOLO(args.model)
 
     source: SimSource | RealSenseSource
     if args.sim:

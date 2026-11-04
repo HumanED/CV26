@@ -30,7 +30,24 @@ python perception/main.py --sim ~/media/desk.jpg           # single image (reuse
 python perception/main.py --sim ~/media/frames/ --loop     # folder of images, looping
 python perception/main.py --sim lab.mp4 --sim-depth-m 0.8  # change the fake distance
 python perception/main.py --sim lab.mp4 --sim-depth d.png  # real depth map, 16-bit PNG in mm
+python perception/main.py --model models/yolo11s-seg-custom.pt  # finetuned weights
 ```
+### Finetuning
+YOLO can be finetuned to detect and outline your own objects. Record one video per object,
+roughly centred in view and from several angles and distances, and name it after the object:
+```
+dataset/video/
+    bottle.mp4  can.mp4  wrapper.mp4 ...
+```
+Build the dataset, then train (or follow the same steps in `perception/finetune.ipynb`):
+```bash
+python dataset/build_dataset.py              # frames -> SAM 2 outlines -> train/val/test split
+python perception/finetune.py                # writes models/yolo11s-seg-custom.pt
+```
+`build_dataset.py` keeps every 5th frame (`--every`), outlines the object at the image centre with
+SAM 2 and splits each object's frames 70/20/10 into train/val/test (`--ratios`). Check the outlines in
+`dataset/preview/` before training, and delete the image and label of any frame SAM got wrong. Rebuild
+with `--overwrite`. Training logs and plots go to `runs/`.
 ### Calibration
 TODO: make the parol6 arm go to home at the start of program and get coordinates from perception.
 ## Copyright
