@@ -7,6 +7,7 @@ from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
 from sim import Intrinsics, SimSource, deproject
+from surface import detect_horizontal_surface, draw_surface, Plane
 
 if TYPE_CHECKING:
     import pyrealsense2 as rs
@@ -77,7 +78,7 @@ def mask_depth_m(depth_img: np.ndarray, poly: np.ndarray,
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line options for sim mode and the YOLO weights."""
+    """Parse command-line options for sim mode, YOLO weights, and surface detection."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--sim", metavar="PATH",
                     help="image, folder of images or video to use instead of the D435")
@@ -88,6 +89,17 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--loop", action="store_true", help="loop the sim media")
     ap.add_argument("--model", default=MODEL_PATH,
                     help=f"YOLO weights, e.g. models/yolo11s-seg-custom.pt (default {MODEL_PATH})")
+    # Surface detection options
+    ap.add_argument("--no-surface", action="store_true",
+                    help="disable horizontal surface (table) detection")
+    ap.add_argument("--surface-min-height", type=float, default=0.2,
+                    help="minimum surface height above camera in metres (default 0.2)")
+    ap.add_argument("--surface-max-height", type=float, default=1.5,
+                    help="maximum surface height above camera in metres (default 1.5)")
+    ap.add_argument("--surface-angle-thresh", type=float, default=15.0,
+                    help="max tilt from horizontal in degrees (default 15.0)")
+    ap.add_argument("--surface-min-area", type=float, default=0.05,
+                    help="minimum surface area in m² (default 0.05)")
     return ap.parse_args()
 
 
@@ -162,6 +174,22 @@ def main() -> None:
                     cv2.putText(color, f"#{tid} {label} {conf:.2f} | {Z:.2f}m",
                                 (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 1)
+
+            # Detect horizontal surface (table) from depth
+            if not args.no_surface:
+                surface: Plane | None = detect_horizontal_surface(
+                    depth, intr, source.depth_scale,
+                    max_height=args.surface_max_height,
+                    min_height=args.surface_min_height,
+                    angle_thresh_deg=args.surface_angle_thresh,
+                    min_area_m2=args.surface_min_area
+                )
+                if surface is not None:
+                    draw_surface(color, surface, intr, source.depth_scale)
+                    X, Y, Z = surface.center_3d
+                    print(f"Surface: center=({X:.2f}, {Y:.2f}, {Z:.2f}) m, "
+                          f"extent={surface.extent[0]:.2f}x{surface.extent[1]:.2f}m, "
+                          f"normal=({surface.normal[0]:.2f}, {surface.normal[1]:.2f}, {surface.normal[2]:.2f})")
 
             cv2.imshow("D435 detections", color)
             if cv2.waitKey(1) & 0xFF == ord("q"):

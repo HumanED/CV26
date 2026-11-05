@@ -32,6 +32,27 @@ python perception/main.py --sim lab.mp4 --sim-depth-m 0.8  # change the fake dis
 python perception/main.py --sim lab.mp4 --sim-depth d.png  # real depth map, 16-bit PNG in mm
 python perception/main.py --model models/yolo11s-seg-custom.pt  # finetuned weights
 ```
+
+#### Surface Detection (Table/Plane Recognition)
+The perception pipeline now includes automatic detection of horizontal planar surfaces
+(e.g. tables, floors) using depth data. When a surface is detected, its boundary is drawn
+in magenta and its 3D position/extent is printed.
+
+```bash
+# Real camera - surface detection runs automatically
+python perception/main.py
+
+# Simulation with synthetic depth (flat plane at fixed distance)
+python perception/main.py --sim ~/media/desk.jpg --sim-depth-m 1.0
+
+# Simulation with a real depth map (16-bit PNG in millimetres)
+python perception/main.py --sim ~/media/desk.jpg --sim-depth depth.png
+```
+
+Surface detection parameters (in `perception/surface.py`):
+- `max_height` / `min_height`: height range of surface above camera (default 1.5m / 0.2m)
+- `angle_thresh_deg`: max tilt from horizontal (default 15°)
+- `min_area_m2`: minimum surface area (default 0.05 m²)
 ### Finetuning
 YOLO is finetuned for instance segmentation (an outline per object) on your own objects. The
 labelled images are made elsewhere, as rendered views of the 3D models or as frames labelled in
