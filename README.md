@@ -79,6 +79,31 @@ python perception/finetune.py                # writes models/yolo11s-seg-custom.
 Labels must be polygons; bounding-box-only labels are rejected. Images with no label file are kept as
 background images. Check the outlines in `dataset/preview/` before training. Rebuild with `--overwrite`.
 Training logs and plots go to `runs/`.
+#### Training on the 3D-printed shapes from their 3D models
+`dataset/render_shapes.py` renders labelled images straight from the STL/OBJ files in `3dprint.ignore/`
+(subfolders such as whole print plates are skipped). The class name is the file name. Each image is
+a random scene of prints on a table, seen from the arm's camera. The renderer varies:
+- colour, including multi-colour prints
+- resting pose: as printed, or rolled onto a stable side
+- camera height and tilt, lighting and shadows
+- table texture and clutter
+- blur and sensor noise
+
+YOLO learns only the shape, so one model works for any filament colour. The colour of each detection
+is named at run time from its pixels (`perception/colors.py`), giving labels like `orange cube` or
+`blue+white star`. To recognise another colour, add its name and hex value to `PALETTE` there.
+```bash
+python dataset/render_shapes.py                                   # 3000 images, every palette colour + random
+python dataset/render_shapes.py --colors orange blue black --overwrite        # only your filaments
+python dataset/render_shapes.py --colors random --multicolor 0.3 --overwrite  # any colour, 30% multi-colour
+python dataset/render_shapes.py --backgrounds ~/photos/table --overwrite      # mix in photos of your table
+python dataset/build_dataset.py --overwrite
+python perception/finetune.py
+python perception/main.py --model models/yolo11s-seg-custom.pt
+```
+Models are read in millimetres (`--units` to change) and keep their real size. A few labelled photos of
+the real prints in `dataset/source/images/real/` (with labels in `labels/real/`) help the model
+carry over from renders to the camera, and give an honest test score.
 ### Calibration
 TODO: make the parol6 arm go to home at the start of program and get coordinates from perception.
 ## Copyright

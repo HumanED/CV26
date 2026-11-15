@@ -6,6 +6,7 @@ import numpy as np
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
+from colors import describe, name_colors
 from sim import Intrinsics, SimSource, deproject
 from surface import Plane, SurfaceTracker, detect_horizontal_surface, draw_surface, up_from_pitch
 
@@ -176,9 +177,10 @@ def main() -> None:
                         continue
 
                     X, Y, Z = t["xyz"]
-                    print(f"#{tid} {label}: ({X:.2f}, {Y:.2f}, {Z:.2f}) m")
+                    name: str = describe(label, name_colors(color, poly))  # e.g. "orange cube"
+                    print(f"#{tid} {name}: ({X:.2f}, {Y:.2f}, {Z:.2f}) m")
                     cv2.polylines(color, [poly.astype(np.int32)], True, (0, 255, 0), 2)
-                    cv2.putText(color, f"#{tid} {label} {conf:.2f} | {Z:.2f}m",
+                    cv2.putText(color, f"#{tid} {name} {conf:.2f} | {Z:.2f}m",
                                 (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 1)
 
