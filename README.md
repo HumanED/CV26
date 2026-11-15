@@ -34,25 +34,32 @@ python perception/main.py --model models/yolo11s-seg-custom.pt  # finetuned weig
 ```
 
 #### Surface Detection (Table/Plane Recognition)
-The perception pipeline now includes automatic detection of horizontal planar surfaces
-(e.g. tables, floors) using depth data. When a surface is detected, its boundary is drawn
-in magenta and its 3D position/extent is printed.
+The perception pipeline finds the surface the camera is directly above, i.e. the table the arm
+stands on, so the arm can use it later. It works on cluttered, slightly warped and irregularly
+shaped surfaces: up-facing depth pixels are grouped by height, each candidate plane is fitted
+robustly and grown with a tolerance that follows the D435's depth noise, and the candidate nearest
+the point straight below the camera is kept (so the floor or a box on the table is not chosen).
+Objects standing on the surface are cut out of it; the usable area with them filled in is
+shaded magenta and its 3D position, extent, area and flatness are printed. The plane is
+smoothed over frames.
 
 ```bash
 # Real camera - surface detection runs automatically
 python perception/main.py
 
-# Simulation with synthetic depth (flat plane at fixed distance)
-python perception/main.py --sim ~/media/desk.jpg --sim-depth-m 1.0
+# Camera tilted 60 degrees down (90 = looking straight down)
+python perception/main.py --surface-pitch 60
 
 # Simulation with a real depth map (16-bit PNG in millimetres)
 python perception/main.py --sim ~/media/desk.jpg --sim-depth depth.png
 ```
 
-Surface detection parameters (in `perception/surface.py`):
-- `max_height` / `min_height`: height range of surface above camera (default 1.5m / 0.2m)
-- `angle_thresh_deg`: max tilt from horizontal (default 15°)
-- `min_area_m2`: minimum surface area (default 0.05 m²)
+Surface detection options (`perception/main.py`, defaults in `perception/surface.py`):
+- `--surface-pitch`: camera tilt below horizontal in degrees, used to know which way is up (default 0)
+- `--surface-min-height` / `--surface-max-height`: distance of the surface below the camera (default 0.2m / 1.5m)
+- `--surface-angle-thresh`: max tilt from horizontal (default 15°)
+- `--surface-min-area`: minimum visible surface area (default 0.05 m²)
+- `--surface-tol`: how uneven the surface may be; objects taller than this are cut out (default 0.015m)
 ### Finetuning
 YOLO is finetuned for instance segmentation (an outline per object) on your own objects. The
 labelled images are made elsewhere, as rendered views of the 3D models or as frames labelled in
