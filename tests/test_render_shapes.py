@@ -198,10 +198,28 @@ class ColorNameTests(unittest.TestCase):
         img, poly = self.square(orange, (orange * 0.75).astype(int))  # shadowed lower half
         self.assertEqual(name_colors(img, poly), ["orange"])
 
+    def test_red_in_shadow_is_not_brown(self):
+        """Lit and shaded faces of a red print as the D435 sees them (BGR, from a real frame)."""
+        img, poly = self.square((18, 27, 173), (59, 62, 129))
+        self.assertEqual(name_colors(img, poly), ["red"])
+
+    def test_white_in_shadow_is_not_grey(self):
+        img, poly = self.square((235, 238, 240), (140, 142, 145))
+        self.assertEqual(name_colors(img, poly), ["white"])
+
     def test_two_colour_print(self):
         img, poly = self.square((200, 90, 30), (240, 240, 240))  # blue top, white bottom (BGR)
         self.assertEqual(sorted(name_colors(img, poly)), ["blue", "white"])
         self.assertEqual(describe("star", ["blue", "white"]), "blue+white star")
+
+    def test_red_and_white_print_keeps_both(self):
+        img, poly = self.square((18, 27, 173), (235, 238, 240))
+        self.assertEqual(sorted(name_colors(img, poly)), ["red", "white"])
+
+    def test_black_and_white_print_keeps_both(self):
+        """Greys merge only when close in lightness; black and white are two filaments."""
+        img, poly = self.square((30, 30, 30), (235, 238, 240))
+        self.assertEqual(sorted(name_colors(img, poly)), ["black", "white"])
 
     def test_hex_and_unknown_colours(self):
         np.testing.assert_allclose(parse_color("#ff8000"), [1, 128 / 255, 0])
