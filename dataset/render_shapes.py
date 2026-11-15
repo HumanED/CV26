@@ -48,11 +48,11 @@ W, H = 640, 480  # image size, as the D435 colour stream in perception/main.py
 FOCAL = 615.0  # D435 colour focal length (px) at 640x480
 SUPERSAMPLE = 2  # render at 2x and shrink, for smooth edges
 OBJECTS = (1, 8)  # objects per image (min, max)
-EMPTY_P = 0.05  # share of images with no objects, so the model learns not to see shapes in clutter
+EMPTY_P = 0.1  # share of images with no objects, so the model learns not to see shapes in clutter
 UPRIGHT_P = 0.6  # share of objects standing as printed; the rest lie in a random stable pose
 SCALE_JITTER = 0.05  # +-5% size, for printer shrink and slicer scaling
-CAM_HEIGHT = (0.15, 0.6)  # camera height above the table (m)
-CAM_PITCH = (30.0, 90.0)  # camera tilt below horizontal (degrees)
+CAM_HEIGHT = (0.04, 0.6)  # camera height above the table (m); low = camera resting near the table
+CAM_PITCH = (5.0, 90.0)  # camera tilt below horizontal (degrees)
 MAX_DIST = 1.0  # objects are placed at most this far from the camera (m)
 MIN_VISIBLE = 0.3  # objects with less of their area visible are not labelled
 MIN_PIXELS = 40  # nor are objects smaller than this (px)
@@ -265,7 +265,9 @@ def triangle_colors(mesh: Mesh, rng: np.random.Generator, colors: list[str],
 
 
 def table_texture(rng: np.random.Generator, size: int) -> np.ndarray:
-    """Random table top (BGR uint8): plain, wood, cutting mat or fabric, with clutter."""
+    """Random table top (BGR uint8): plain, wood, cutting mat, fabric grain or a busy
+    printed pattern (flowers, leaves, swirls, dots), with clutter. The patterns teach the
+    model that blobs in a fabric print are not shapes."""
     def smooth_noise(cells: int) -> np.ndarray:
         small = rng.random((cells, cells)).astype(np.float32)
         return cv2.resize(small, (size, size), interpolation=cv2.INTER_CUBIC)
@@ -274,7 +276,7 @@ def table_texture(rng: np.random.Generator, size: int) -> np.ndarray:
     sat = rng.uniform(0, 0.4) if rng.random() < 0.8 else rng.uniform(0.4, 1)
     hsv = np.uint8([[[rng.integers(0, 180), sat * 255, rng.uniform(0.15, 0.95) * 255]]])
     base = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0] / 255.0
-    kind = rng.integers(4)
+    kind = rng.choice(5, p=[0.2, 0.15, 0.15, 0.15, 0.35])
     if kind == 0:  # plain, slightly uneven
         tex = base.astype(np.float32) * (0.85 + 0.3 * smooth_noise(4))[..., None]
     elif kind == 1:  # wood grain
@@ -289,8 +291,10 @@ def table_texture(rng: np.random.Generator, size: int) -> np.ndarray:
         line = np.clip(base * 0.6 + 0.4, 0, 1)
         tex[::step] = line
         tex[:, ::step] = line
-    else:  # fabric / paper grain
+    elif kind == 3:  # fabric / paper grain
         tex = base.astype(np.float32) * (0.8 + 0.2 * rng.random((size, size), np.float32))[..., None]
+    else:  # printed pattern
+        tex = _pattern(rng, size, base)
     tex = tex * (0.9 + 0.2 * smooth_noise(3))[..., None]
     tex = np.clip(tex * 255, 0, 255).astype(np.uint8)
 
@@ -306,6 +310,36 @@ def table_texture(rng: np.random.Generator, size: int) -> np.ndarray:
             cv2.line(tex, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), color,
                      int(rng.integers(1, 12)))
     return tex
+
+
+def _pattern(rng: np.random.Generator, size: int, base: np.ndarray) -> np.ndarray:
+    """Busy printed fabric (float BGR 0-1): motifs scattered over a base colour."""
+    tex = np.empty((size, size, 3), np.float32)
+    tex[:] = base
+    inks = [np.clip(base + rng.uniform(-0.5, 0.5), 0, 1) for _ in range(2)] + [np.ones(3) * rng.uniform(0.8, 1)]
+    scale = rng.uniform(6, 40)  # motif size (px)
+    for _ in range(int(rng.uniform(0.3, 1.5) * (size / scale) ** 2 / 4)):
+        ink = tuple(float(x) for x in inks[rng.integers(len(inks))])
+        cx, cy = (int(x) for x in rng.integers(0, size, 2))
+        r = scale * rng.uniform(0.4, 1.2)
+        thick = -1 if rng.random() < 0.6 else int(rng.integers(1, 4))
+        motif = rng.integers(4)
+        if motif == 0:  # flower: petals round a centre
+            n = int(rng.integers(4, 8))
+            for a in np.linspace(0, 360, n, endpoint=False) + rng.uniform(0, 360):
+                px = cx + r * 0.6 * np.cos(np.radians(a))
+                py = cy + r * 0.6 * np.sin(np.radians(a))
+                cv2.ellipse(tex, (int(px), int(py)), (int(r * 0.5), max(1, int(r * 0.25))), a, 0, 360, ink, thick)
+        elif motif == 1:  # leaf
+            cv2.ellipse(tex, (cx, cy), (int(r), max(1, int(r * rng.uniform(0.2, 0.5)))),
+                        rng.uniform(0, 180), 0, 360, ink, thick)
+        elif motif == 2:  # swirl / stem
+            t = np.linspace(0, rng.uniform(2, 6), 30)
+            pts = np.column_stack([cx + r * t * np.cos(t), cy + r * t * np.sin(t)]) * [1, rng.choice([-1, 1])]
+            cv2.polylines(tex, [pts.astype(np.int32)], False, ink, int(rng.integers(1, 4)))
+        else:  # dot
+            cv2.circle(tex, (cx, cy), max(1, int(r * 0.3)), ink, -1)
+    return cv2.GaussianBlur(tex, (0, 0), rng.uniform(0.5, 2))
 
 
 def camera(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -357,6 +391,11 @@ def render(meshes: list[Mesh], rng: np.random.Generator, colors: list[str],
         img[:] = wall
         cv2.warpPerspective(table_texture(rng, size), hom, (w, h), img,
                             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_TRANSPARENT)
+        # Rays at or above the horizon never meet the table; the warp mirrors the
+        # texture there, so paint them wall
+        u, v = np.meshgrid(np.arange(w), np.arange(h))
+        down = (r.T @ np.linalg.inv(k))[2]  # world z of each pixel's ray, linear in u, v
+        img[down[0] * u + down[1] * v + down[2] > -1e-3] = wall
 
     # Lighting: one directional light, ambient fill, slightly glossy plastic
     elev, azim = np.radians(rng.uniform(25, 85)), rng.uniform(0, 2 * np.pi)
@@ -371,7 +410,8 @@ def render(meshes: list[Mesh], rng: np.random.Generator, colors: list[str],
     for _ in range(n_obj * 20):
         if len(placed) == n_obj:
             break
-        p = table_point(k, r, c, rng.uniform([0.05 * w, 0.05 * h], [0.95 * w, 0.95 * h]))
+        # a little outside the frame too, so objects cut off at the edge are seen
+        p = table_point(k, r, c, rng.uniform([-0.1 * w, -0.1 * h], [1.1 * w, 1.1 * h]))
         if p is None:
             continue
         i = int(rng.integers(len(meshes)))
@@ -413,7 +453,7 @@ def render(meshes: list[Mesh], rng: np.random.Generator, colors: list[str],
             cv2.fillConvexPoly(shadow, cv2.convexHull(shadow_px), 1.0)
 
         cam = (world.reshape(-1, 3) - c) @ r.T
-        if (cam[:, 2] < 0.05).any():
+        if (cam[:, 2] < 0.02).any():
             continue  # too close to or behind the camera
         tris_all.append(world[facing])
         ids_all.append(np.full(facing.sum(), obj + 1))
