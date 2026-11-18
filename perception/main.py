@@ -1,4 +1,5 @@
 import argparse
+import itertools
 from typing import TYPE_CHECKING, Any
 
 import cv2
@@ -20,6 +21,8 @@ MIN_HITS = 3  # frames an object must be seen before it is reported
 EMA_ALPHA = 0.4  # smoothing weight for the newest position (1 = no smoothing)
 Z_MIN, Z_MAX = 0.3, 3.0  # accepted object distance from the camera (m)
 SURFACE_STEP = 2  # surface detection uses every 2nd depth pixel, ~4x faster
+SURFACE_SETTLE = 15  # detect the surface on every one of the first frames, until it settles
+SURFACE_RECHECK = FPS  # then only every this many frames (~1 s), as it moves only with the camera
 
 # YOLO label -> (min, max) real object height in metres; unlisted labels allow 0-10 m
 SIZE_RANGE: dict[str, tuple[float, float]] = {
@@ -142,7 +145,7 @@ def main() -> None:
     surface_tracker = SurfaceTracker()  # smooths the surface over frames; reset() when the arm moves
 
     try:
-        while True:
+        for frame_i in itertools.count():
             data: tuple[np.ndarray, np.ndarray, Intrinsics | rs.intrinsics] | None = source.read()
             if data is None:
                 print("End of media")
@@ -186,6 +189,7 @@ def main() -> None:
 
             # Detect the surface the camera is directly above (table), smoothed over frames
             if not args.no_surface:
+                detect: bool = frame_i < SURFACE_SETTLE or frame_i % SURFACE_RECHECK == 0
                 surface: Plane | None = surface_tracker.update(detect_horizontal_surface(
                     depth, intr, source.depth_scale,
                     max_height=args.surface_max_height,
@@ -195,7 +199,7 @@ def main() -> None:
                     up=surface_up,
                     surface_tol=args.surface_tol,
                     step=SURFACE_STEP
-                ))
+                )) if detect else surface_tracker.plane
                 if surface is not None:
                     draw_surface(color, surface, intr, source.depth_scale)
                     X, Y, Z = surface.center_3d
