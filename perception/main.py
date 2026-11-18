@@ -6,8 +6,9 @@ import numpy as np
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
+from colors import describe, name_colors
 from sim import Intrinsics, SimSource, deproject
-from surface import detect_horizontal_surface, draw_surface, Plane
+from surface import Plane, SurfaceTracker, detect_horizontal_surface, draw_surface, up_from_pitch
 
 if TYPE_CHECKING:
     import pyrealsense2 as rs
@@ -18,6 +19,7 @@ CONF = 0.5  # minimum YOLO confidence (0-1) to keep a detection
 MIN_HITS = 3  # frames an object must be seen before it is reported
 EMA_ALPHA = 0.4  # smoothing weight for the newest position (1 = no smoothing)
 Z_MIN, Z_MAX = 0.3, 3.0  # accepted object distance from the camera (m)
+SURFACE_STEP = 2  # surface detection uses every 2nd depth pixel, ~4x faster
 
 # YOLO label -> (min, max) real object height in metres; unlisted labels allow 0-10 m
 SIZE_RANGE: dict[str, tuple[float, float]] = {
@@ -100,6 +102,10 @@ def parse_args() -> argparse.Namespace:
                     help="max tilt from horizontal in degrees (default 15.0)")
     ap.add_argument("--surface-min-area", type=float, default=0.05,
                     help="minimum surface area in m² (default 0.05)")
+    ap.add_argument("--surface-pitch", type=float, default=0.0,
+                    help="camera tilt below horizontal in degrees, 90 = looking straight down (default 0)")
+    ap.add_argument("--surface-tol", type=float, default=0.015,
+                    help="how uneven the surface may be, in metres; taller objects are cut out (default 0.015)")
     return ap.parse_args()
 
 
@@ -132,6 +138,8 @@ def main() -> None:
         source = RealSenseSource()
 
     tracks: dict[int, dict[str, Any]] = {}  # track ID -> {"xyz": smoothed position (m), "hits": frames seen}
+    surface_up: np.ndarray = up_from_pitch(args.surface_pitch)  # world up in camera coords
+    surface_tracker = SurfaceTracker()  # smooths the surface over frames; reset() when the arm moves
 
     try:
         while True:
@@ -169,26 +177,32 @@ def main() -> None:
                         continue
 
                     X, Y, Z = t["xyz"]
-                    print(f"#{tid} {label}: ({X:.2f}, {Y:.2f}, {Z:.2f}) m")
+                    name: str = describe(label, name_colors(color, poly))  # e.g. "orange cube"
+                    print(f"#{tid} {name}: ({X:.2f}, {Y:.2f}, {Z:.2f}) m")
                     cv2.polylines(color, [poly.astype(np.int32)], True, (0, 255, 0), 2)
-                    cv2.putText(color, f"#{tid} {label} {conf:.2f} | {Z:.2f}m",
+                    cv2.putText(color, f"#{tid} {name} {conf:.2f} | {Z:.2f}m",
                                 (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 1)
 
-            # Detect horizontal surface (table) from depth
+            # Detect the surface the camera is directly above (table), smoothed over frames
             if not args.no_surface:
-                surface: Plane | None = detect_horizontal_surface(
+                surface: Plane | None = surface_tracker.update(detect_horizontal_surface(
                     depth, intr, source.depth_scale,
                     max_height=args.surface_max_height,
                     min_height=args.surface_min_height,
                     angle_thresh_deg=args.surface_angle_thresh,
-                    min_area_m2=args.surface_min_area
-                )
+                    min_area_m2=args.surface_min_area,
+                    up=surface_up,
+                    surface_tol=args.surface_tol,
+                    step=SURFACE_STEP
+                ))
                 if surface is not None:
                     draw_surface(color, surface, intr, source.depth_scale)
                     X, Y, Z = surface.center_3d
                     print(f"Surface: center=({X:.2f}, {Y:.2f}, {Z:.2f}) m, "
+                          f"{surface.d:.2f} m below camera, "
                           f"extent={surface.extent[0]:.2f}x{surface.extent[1]:.2f}m, "
+                          f"area={surface.area:.2f}m², flatness={surface.flatness * 1000:.1f}mm, "
                           f"normal=({surface.normal[0]:.2f}, {surface.normal[1]:.2f}, {surface.normal[2]:.2f})")
 
             cv2.imshow("D435 detections", color)

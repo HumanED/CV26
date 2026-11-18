@@ -9,6 +9,8 @@ from perception.surface import (
     fit_plane_ransac,
     extract_boundary,
     detect_horizontal_surface,
+    up_from_pitch,
+    SurfaceTracker,
 )
 
 
@@ -235,6 +237,146 @@ class DetectHorizontalSurfaceTests(unittest.TestCase):
             angle_thresh_deg=15.0, min_area_m2=0.05
         )
         self.assertIsNone(surface)
+
+
+def render_scene(intr, up, slabs, shape=(480, 640), noise=0.0, warp=0.0, seed=0):
+    """Ray-cast a depth image (mm) of horizontal rectangles seen by a camera.
+
+    up: world up in camera coords. slabs: list of (height below camera, (x0, x1), (y0, y1))
+    with x along the camera's X axis projected onto the floor and y away from the camera,
+    both measured from the point directly below it. Nearest hit wins. noise adds D435-like
+    Gaussian depth noise (sigma = noise * z^2); warp adds a smooth bump of that amplitude (m).
+    """
+    up = np.asarray(up, float) / np.linalg.norm(up)
+    ex = np.array([1.0, 0, 0]) - up[0] * up
+    ex /= np.linalg.norm(ex)
+    ey = np.cross(up, ex)
+    if ey @ np.array([0, 0, 1.0]) < 0:
+        ey = -ey
+    h, w = shape
+    u, v = np.meshgrid(np.arange(w), np.arange(h))
+    rays = np.stack([(u - intr.ppx) / intr.fx, (v - intr.ppy) / intr.fy, np.ones((h, w))], -1)
+    best = np.full((h, w), np.inf)
+    for height, (x0, x1), (y0, y1) in slabs:
+        down = -(rays @ up)  # how fast a ray drops per unit z
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(down > 1e-6, height / down, np.inf)
+        p = rays * t[..., None]
+        px, py = p @ ex, p @ ey
+        if warp:
+            t = t * (1 + warp * np.sin(px * 6) * np.cos(py * 5) / np.maximum(height, 1e-3))
+        hit = np.isfinite(t) & (px >= x0) & (px <= x1) & (py >= y0) & (py <= y1)
+        best = np.where(hit & (t < best), t, best)
+    z = np.where(np.isfinite(best), best, 0.0)
+    if noise:
+        z = z + np.random.default_rng(seed).normal(0, 1, z.shape) * noise * z ** 2
+    z[(z <= 0) | (z > 4)] = 0
+    return np.round(z * 1000).astype(np.uint16)
+
+
+class SupportSurfaceTests(unittest.TestCase):
+    """Scenes where the surface below the camera must be picked out of several."""
+
+    def setUp(self):
+        self.intr = Intrinsics(640, 480, 615.0, 615.0, 320.0, 240.0)
+        self.table = (0.45, (-0.6, 0.6), (0.0, 0.9))
+        self.floor = (1.2, (-3, 3), (0.0, 4))
+
+    def detect(self, depth, up=None):
+        return detect_horizontal_surface(depth, self.intr, 0.001, max_height=1.5,
+                                         min_height=0.1, up=up)
+
+    def test_picks_table_over_floor(self):
+        """With the floor visible past the table edge, the table is the one returned."""
+        up = up_from_pitch(35)
+        depth = render_scene(self.intr, up, [self.table, self.floor])
+        surface = self.detect(depth, up)
+        self.assertIsNotNone(surface)
+        self.assertAlmostEqual(surface.d, 0.45, delta=0.005)
+
+    def test_tilted_camera_needs_matching_up(self):
+        """A camera pitched 60 degrees down finds the table when told its pitch."""
+        up = up_from_pitch(60)
+        depth = render_scene(self.intr, up, [self.table, self.floor])
+        surface = self.detect(depth, up)
+        self.assertIsNotNone(surface)
+        self.assertGreater(surface.normal @ up, np.cos(np.radians(1)))
+        self.assertAlmostEqual(surface.d, 0.45, delta=0.005)
+
+    def test_objects_on_table_are_cut_out_but_filled_in_support(self):
+        """A box on the table is not surface, yet the usable area covers it."""
+        up = up_from_pitch(70)
+        box = (0.35, (-0.08, 0.08), (0.08, 0.22))  # 10 cm tall
+        depth = render_scene(self.intr, up, [self.table, box, self.floor])
+        surface = self.detect(depth, up)
+        self.assertIsNotNone(surface)
+        self.assertAlmostEqual(surface.d, 0.45, delta=0.005)
+        box_px = render_scene(self.intr, up, [box]) > 0
+        self.assertLess((surface.inlier_mask & box_px).sum(), 0.05 * box_px.sum())
+        self.assertGreater((surface.support_mask & box_px).sum(), 0.9 * box_px.sum())
+
+    def test_noisy_warped_surface(self):
+        """Depth noise and a few mm of warp still give an accurate, complete plane."""
+        up = up_from_pitch(50)
+        clean = render_scene(self.intr, up, [self.table])
+        depth = render_scene(self.intr, up, [self.table], noise=0.004, warp=0.006)
+        surface = self.detect(depth, up)
+        self.assertIsNotNone(surface)
+        self.assertAlmostEqual(surface.d, 0.45, delta=0.01)
+        self.assertGreater(surface.normal @ up, np.cos(np.radians(2)))
+        self.assertGreater(surface.inlier_mask.sum(), 0.85 * (clean > 0).sum())
+
+    def test_area_matches_visible_surface(self):
+        """Area is measured on the surface, not in pixels."""
+        up = up_from_pitch(90)  # straight down: whole table in view
+        table = (0.6, (-0.2, 0.2), (-0.15, 0.15))
+        surface = self.detect(render_scene(self.intr, up, [table]), up)
+        self.assertIsNotNone(surface)
+        self.assertAlmostEqual(surface.area, 0.4 * 0.3, delta=0.01)
+        self.assertAlmostEqual(max(surface.extent), 0.4, delta=0.02)
+        self.assertAlmostEqual(min(surface.extent), 0.3, delta=0.02)
+
+    def test_half_resolution_matches_full(self):
+        """step=2 gives the same plane and full-size masks."""
+        up = up_from_pitch(50)
+        depth = render_scene(self.intr, up, [self.table, self.floor], noise=0.004)
+        full = self.detect(depth, up)
+        half = detect_horizontal_surface(depth, self.intr, 0.001, max_height=1.5,
+                                         min_height=0.1, up=up, step=2)
+        self.assertEqual(half.inlier_mask.shape, depth.shape)
+        self.assertAlmostEqual(half.d, full.d, delta=0.003)
+        self.assertGreater((half.inlier_mask & full.inlier_mask).sum(),
+                           0.9 * full.inlier_mask.sum())
+
+
+class SurfaceTrackerTests(unittest.TestCase):
+    """Tests for temporal smoothing of detections."""
+
+    def setUp(self):
+        self.intr = Intrinsics(640, 480, 615.0, 615.0, 320.0, 240.0)
+        self.up = up_from_pitch(50)
+        self.table = (0.45, (-0.6, 0.6), (0.0, 0.9))
+
+    def test_smoothing_reduces_jitter(self):
+        """Tracked offset varies less than per-frame offsets under noise."""
+        tracker = SurfaceTracker()
+        raw, tracked = [], []
+        for i in range(20):
+            depth = render_scene(self.intr, self.up, [self.table], noise=0.006, seed=i)
+            plane = detect_horizontal_surface(depth, self.intr, 0.001, up=self.up)
+            raw.append(plane.d)
+            tracked.append(tracker.update(plane).d)
+        self.assertLess(np.std(tracked[5:]), np.std(raw[5:]))
+
+    def test_holds_through_missed_frames_then_drops(self):
+        """A missed frame keeps the last plane; many missed frames drop it."""
+        tracker = SurfaceTracker(hold_frames=2)
+        depth = render_scene(self.intr, self.up, [self.table])
+        plane = detect_horizontal_surface(depth, self.intr, 0.001, up=self.up)
+        tracker.update(plane)
+        self.assertIsNotNone(tracker.update(None))
+        self.assertIsNotNone(tracker.update(None))
+        self.assertIsNone(tracker.update(None))
 
 
 if __name__ == "__main__":

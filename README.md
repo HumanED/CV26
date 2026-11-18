@@ -34,25 +34,32 @@ python perception/main.py --model models/yolo11s-seg-custom.pt  # finetuned weig
 ```
 
 #### Surface Detection (Table/Plane Recognition)
-The perception pipeline now includes automatic detection of horizontal planar surfaces
-(e.g. tables, floors) using depth data. When a surface is detected, its boundary is drawn
-in magenta and its 3D position/extent is printed.
+The perception pipeline finds the surface the camera is directly above, i.e. the table the arm
+stands on, so the arm can use it later. It works on cluttered, slightly warped and irregularly
+shaped surfaces: up-facing depth pixels are grouped by height, each candidate plane is fitted
+robustly and grown with a tolerance that follows the D435's depth noise, and the candidate nearest
+the point straight below the camera is kept (so the floor or a box on the table is not chosen).
+Objects standing on the surface are cut out of it; the usable area with them filled in is
+shaded magenta and its 3D position, extent, area and flatness are printed. The plane is
+smoothed over frames.
 
 ```bash
 # Real camera - surface detection runs automatically
 python perception/main.py
 
-# Simulation with synthetic depth (flat plane at fixed distance)
-python perception/main.py --sim ~/media/desk.jpg --sim-depth-m 1.0
+# Camera tilted 60 degrees down (90 = looking straight down)
+python perception/main.py --surface-pitch 60
 
 # Simulation with a real depth map (16-bit PNG in millimetres)
 python perception/main.py --sim ~/media/desk.jpg --sim-depth depth.png
 ```
 
-Surface detection parameters (in `perception/surface.py`):
-- `max_height` / `min_height`: height range of surface above camera (default 1.5m / 0.2m)
-- `angle_thresh_deg`: max tilt from horizontal (default 15°)
-- `min_area_m2`: minimum surface area (default 0.05 m²)
+Surface detection options (`perception/main.py`, defaults in `perception/surface.py`):
+- `--surface-pitch`: camera tilt below horizontal in degrees, used to know which way is up (default 0)
+- `--surface-min-height` / `--surface-max-height`: distance of the surface below the camera (default 0.2m / 1.5m)
+- `--surface-angle-thresh`: max tilt from horizontal (default 15°)
+- `--surface-min-area`: minimum visible surface area (default 0.05 m²)
+- `--surface-tol`: how uneven the surface may be; objects taller than this are cut out (default 0.015m)
 
 ### Finetuning
 YOLO is finetuned for instance segmentation (an outline per object) on your own objects. The
@@ -73,6 +80,31 @@ python perception/finetune.py                # writes models/yolo11s-seg-custom.
 Labels must be polygons; bounding-box-only labels are rejected. Images with no label file are kept as
 background images. Check the outlines in `dataset/preview/` before training. Rebuild with `--overwrite`.
 Training logs and plots go to `runs/`.
+#### Training on the 3D-printed shapes from their 3D models
+`dataset/render_shapes.py` renders labelled images straight from the STL/OBJ files in `3dprint.ignore/`
+(subfolders such as whole print plates are skipped). The class name is the file name. Each image is
+a random scene of prints on a table, seen from the arm's camera. The renderer varies:
+- colour, including multi-colour prints
+- resting pose: as printed, or rolled onto a stable side
+- camera height and tilt, lighting and shadows
+- table texture and clutter
+- blur and sensor noise
+
+YOLO learns only the shape, so one model works for any filament colour. The colour of each detection
+is named at run time from its pixels (`perception/colors.py`), giving labels like `orange cube` or
+`blue+white star`. To recognise another colour, add its name and hex value to `PALETTE` there.
+```bash
+python dataset/render_shapes.py                                   # 3000 images, every palette colour + random
+python dataset/render_shapes.py --colors orange blue black --overwrite        # only your filaments
+python dataset/render_shapes.py --colors random --multicolor 0.3 --overwrite  # any colour, 30% multi-colour
+python dataset/render_shapes.py --backgrounds ~/photos/table --overwrite      # mix in photos of your table
+python dataset/build_dataset.py --overwrite
+python perception/finetune.py
+python perception/main.py --model models/yolo11s-seg-custom.pt
+```
+Models are read in millimetres (`--units` to change) and keep their real size. A few labelled photos of
+the real prints in `dataset/source/images/real/` (with labels in `labels/real/`) help the model
+carry over from renders to the camera, and give an honest test score.
 ### Calibration
 TODO: make the parol6 arm go to home at the start of program and get coordinates from perception.
 ## Copyright
