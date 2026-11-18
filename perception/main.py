@@ -1,4 +1,5 @@
 import argparse
+import itertools
 from typing import TYPE_CHECKING, Any
 
 import cv2
@@ -20,10 +21,8 @@ MIN_HITS = 3  # frames an object must be seen before it is reported
 EMA_ALPHA = 0.4  # smoothing weight for the newest position (1 = no smoothing)
 Z_MIN, Z_MAX = 0.3, 3.0  # accepted object distance from the camera (m)
 SURFACE_STEP = 2  # surface detection uses every 2nd depth pixel, ~4x faster
-SURFACE_SETTLE = 15  # frames the surface is detected in a row at start and after a reset
-SURFACE_RECHECK = FPS  # once settled, detect again every this many frames (~1 s)
-SURFACE_MOVE_M = 0.01  # report the surface again when its offset changes by more than this (m)
-SURFACE_TILT_DEG = 2.0  # or when its normal turns by more than this (degrees)
+SURFACE_SETTLE = 15  # detect the surface on every one of the first frames, until it settles
+SURFACE_RECHECK = FPS  # then only every this many frames (~1 s), as it moves only with the camera
 
 # YOLO label -> (min, max) real object height in metres; unlisted labels allow 0-10 m
 SIZE_RANGE: dict[str, tuple[float, float]] = {
@@ -113,27 +112,6 @@ def parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-def surface_changed(old: Plane | None, new: Plane | None) -> bool:
-    """True if the surface appeared, disappeared, or moved enough to report again."""
-    if old is None or new is None:
-        return old is not new
-    tilt = float(np.degrees(np.arccos(np.clip(old.normal @ new.normal, -1.0, 1.0))))
-    return abs(new.d - old.d) > SURFACE_MOVE_M or tilt > SURFACE_TILT_DEG
-
-
-def print_surface(surface: Plane | None) -> None:
-    """Print the surface's position, size and orientation, or that it was lost."""
-    if surface is None:
-        print("Surface: lost")
-        return
-    X, Y, Z = surface.center_3d
-    print(f"Surface: center=({X:.2f}, {Y:.2f}, {Z:.2f}) m, "
-          f"{surface.d:.2f} m below camera, "
-          f"extent={surface.extent[0]:.2f}x{surface.extent[1]:.2f}m, "
-          f"area={surface.area:.2f}m², flatness={surface.flatness * 1000:.1f}mm, "
-          f"normal=({surface.normal[0]:.2f}, {surface.normal[1]:.2f}, {surface.normal[2]:.2f})")
-
-
 def find_path() -> None:
     """Plan servo coordinates from the object to its category's drop-off location. Not yet implemented."""
     pass
@@ -165,13 +143,9 @@ def main() -> None:
     tracks: dict[int, dict[str, Any]] = {}  # track ID -> {"xyz": smoothed position (m), "hits": frames seen}
     surface_up: np.ndarray = up_from_pitch(args.surface_pitch)  # world up in camera coords
     surface_tracker = SurfaceTracker()  # smooths the surface over frames; reset() when the arm moves
-    surface: Plane | None = None  # current tracked surface, drawn every frame
-    reported: Plane | None = None  # surface as last printed
-    settle_left: int = SURFACE_SETTLE  # detections left before switching to periodic checks
-    frame_i: int = 0
 
     try:
-        while True:
+        for frame_i in itertools.count():
             data: tuple[np.ndarray, np.ndarray, Intrinsics | rs.intrinsics] | None = source.read()
             if data is None:
                 print("End of media")
@@ -213,36 +187,31 @@ def main() -> None:
                                 (x1, max(y1 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 1)
 
-            # Detect the surface the camera is directly above (table). It only moves when the
-            # camera does, so detect every frame until the tracker settles, then about once a
-            # second; reset (key r, later the arm) to detect every frame again
+            # Detect the surface the camera is directly above (table), smoothed over frames
             if not args.no_surface:
-                if settle_left > 0 or frame_i % SURFACE_RECHECK == 0:
-                    surface = surface_tracker.update(detect_horizontal_surface(
-                        depth, intr, source.depth_scale,
-                        max_height=args.surface_max_height,
-                        min_height=args.surface_min_height,
-                        angle_thresh_deg=args.surface_angle_thresh,
-                        min_area_m2=args.surface_min_area,
-                        up=surface_up,
-                        surface_tol=args.surface_tol,
-                        step=SURFACE_STEP
-                    ))
-                    settle_left = max(settle_left - 1, 0)
-                    if settle_left == 0 and surface_changed(reported, surface):
-                        print_surface(surface)
-                        reported = surface
+                detect: bool = frame_i < SURFACE_SETTLE or frame_i % SURFACE_RECHECK == 0
+                surface: Plane | None = surface_tracker.update(detect_horizontal_surface(
+                    depth, intr, source.depth_scale,
+                    max_height=args.surface_max_height,
+                    min_height=args.surface_min_height,
+                    angle_thresh_deg=args.surface_angle_thresh,
+                    min_area_m2=args.surface_min_area,
+                    up=surface_up,
+                    surface_tol=args.surface_tol,
+                    step=SURFACE_STEP
+                )) if detect else surface_tracker.plane
                 if surface is not None:
                     draw_surface(color, surface, intr, source.depth_scale)
-            frame_i += 1
+                    X, Y, Z = surface.center_3d
+                    print(f"Surface: center=({X:.2f}, {Y:.2f}, {Z:.2f}) m, "
+                          f"{surface.d:.2f} m below camera, "
+                          f"extent={surface.extent[0]:.2f}x{surface.extent[1]:.2f}m, "
+                          f"area={surface.area:.2f}m², flatness={surface.flatness * 1000:.1f}mm, "
+                          f"normal=({surface.normal[0]:.2f}, {surface.normal[1]:.2f}, {surface.normal[2]:.2f})")
 
             cv2.imshow("D435 detections", color)
-            key: int = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
-            if key == ord("r"):  # the camera moved: find the surface again
-                surface_tracker.reset()
-                surface, reported, settle_left = None, None, SURFACE_SETTLE
     finally:
         source.stop()
         cv2.destroyAllWindows()
